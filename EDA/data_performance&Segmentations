@@ -1,0 +1,119 @@
+
+--analyze the yearly performance of the product by comparing each products sale of both
+--its avg_sales performance and the previous year sale
+
+with yearly_product_sales as (
+select 
+ EXTRACT(YEAR FROM f.order_date) AS order_year,
+p.product_name,
+sum(f.sales_amount) as current_sale
+from gold.fact_sales f
+left join gold.dim_products p
+on f.product_key = p.product_key
+where order_date is not null
+group by EXTRACT(YEAR FROM f.order_date),p.product_name
+)
+select 
+order_year,
+product_name,
+current_sale,
+round(avg(current_sale) over (partition by product_name),0) as avg_sale,
+current_sale - round(avg(current_sale) over (partition by product_name),0) as avg_diff,
+case 
+when current_sale - round(avg(current_sale) over (partition by product_name),0) > 0 then 'Above Average'
+when current_sale - round(avg(current_sale) over (partition by product_name),0) < 0 then 'Below Average'
+     else 'Avg'
+end avg_change,
+lag(current_sale) over (partition by product_name order by order_year) as py_sales,
+current_sale - lag(current_sale) over (partition by product_name order by order_year)as diff_py,
+case 
+when current_sale - lag(current_sale) over (partition by product_name order by order_year) > 0 then 'Increase'
+when current_sale - lag(current_sale) over (partition by product_name order by order_year) < 0 then 'Decrease'
+     else 'No chsnge'
+end py_changes
+from yearly_product_sales
+order by product_name,order_year;
+
+
+-- Analyze how an individual part is performing ompaired to overall, allowing us to understand which category has 
+--the greater impact on business
+
+with category_sales as(
+select 
+p.category,
+sum(f.sales_amount) as total_sales
+from gold.fact_sales f
+left join gold.dim_products p 
+on p.product_key = f.product_key
+group by p.category
+) 
+select 
+category,
+total_sales,
+sum(total_sales) over () overall_sales,
+concat(round((total_sales / sum(total_sales) over ()) * 100, 2 ),'%') as percentage_total_sales
+from category_sales
+
+
+--Segment products into cost ranges and count how many products fall into each segment
+
+with product_segment as(
+select 
+product_key,
+product_name,
+cost,
+case 
+     when cost < 100 then 'Below 100'
+     when cost between 100 and 500 then '100-500'
+     when cost between 500 and 1000 then '500-1000'
+else 'Above 1000'
+end cost_range
+from gold.dim_products
+)
+select 
+cost_range,
+count(product_key) as total_products
+from product_segment 
+group by cost_range
+order by total_products desc
+
+/*Group customer into three segments based on their spending behavior
+
+Segment	  Condition
+VIP - 	  Lifespan is at least 12 months and spending is greater than €5,000
+Regular-  Lifespan is at least 12 months and spending is €5,000 or less
+New	-     Lifespan is less than 12 months
+and Count the customers in each segment
+*/
+
+with customer_segment as(
+select 
+c.customer_key,
+sum(f.sales_amount) as total_spending,
+min(order_date) as first_order,
+max(order_date) as last_order,
+(
+        EXTRACT(YEAR FROM AGE(MAX(f.order_date), MIN(f.order_date))) * 12
+        + EXTRACT(MONTH FROM AGE(MAX(f.order_date), MIN(f.order_date)))
+) AS lifespan_months
+from gold.dim_customers c
+left join gold.fact_sales f
+on c.customer_key = f.customer_key
+group by c.customer_key
+)
+select 
+cust_segmt,
+Count (customer_key) as total_customer
+from (
+select 
+customer_key,
+-- total_spending,
+-- lifespan_months,
+case 
+     when lifespan_months >= 12 and total_spending > 5000 then 'VIP'
+     when lifespan_months >= 12 and total_spending <= 5000 then 'Regular'
+else 'New'
+end cust_segmt	  
+from customer_segment) t
+group by cust_segmt
+order by total_customer desc
